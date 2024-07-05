@@ -16,7 +16,7 @@ async function main() {
 
   // We get the contract to deploy
   const Ploutos = await hre.ethers.getContractFactory("Ploutos");
-  const ploutos = await Ploutos.deploy(process.env.ADMIN_WALLET, process.env.FEE_WALLET);
+  const ploutos = await Ploutos.deploy(process.env.ADMIN_WALLET);
 
   await ploutos.deployed();
 

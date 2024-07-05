@@ -6,23 +6,40 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Capped.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
+contract Ploutos is ERC20Capped, ReentrancyGuard {
+    uint256 public constant maxSupply = 21000046153 * 10 ** 7;
+
+    Distributor public distibutor;
+
+    constructor(
+        address _admin
+    ) ERC20("PLOUTOS", "PLTL") ERC20Capped(maxSupply) {
+        require(_admin != address(0), "Invalid admin address");
+        distibutor = new Distributor(address(this), msg.sender, _admin);
+        _mint(_admin, 70000000 * 10 ** 9);
+        _mint(address(distibutor), 14000046153 * 10 ** 7);
+    }
+
+    function decimals() public pure override returns (uint8) {
+        return 9;
+    }
+}
+
+contract Distributor is ReentrancyGuard, Ownable {
     struct Allocation {
         uint256 totalAmount;
         uint256 claimedAmount;
         uint256 nextClaimTime;
     }
 
-    uint256 public constant maxSupply = 21000046153 * 10 ** 7;
-    uint256 public constant AIRDROP_AMOUNT = 30 * 10 ** 9; // PLTL has 9 decimals
-    uint256 public constant IMMEDIATE_AIRDROP = 3 * 10 ** 8; // 0.3 PLTL
-    uint256 public constant FEE = 0.0002 ether;
     uint256 public constant DAY30 = 30 days;
     uint256 public presaleRate; // PLTL per ETH
-    bool public presaleActive = true;
+    uint256 public unclaimedAllocation;
 
-    address public feeReceiver;
+    bool public presaleActive = true;
+    
     address public admin;
+    Ploutos public token;
 
     mapping(address => Allocation[]) public allocations;
 
@@ -33,39 +50,28 @@ contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
     event PresaleStatusChanged(bool isActive);
     event AllocationIncreased(address indexed user, uint256 amount);
 
-    constructor(
-        address _admin,
-        address _feeReceiver
-    ) ERC20("PLOUTOS", "PLTL") ERC20Capped(maxSupply) Ownable(msg.sender) {
-        require(_feeReceiver != address(0), "Invalid fee receiver address");
+    modifier isAdministrator() {
+        require(msg.sender == admin || msg.sender == owner(), "ACCESS DENIED");
+        _;
+    }
+
+    constructor(address _token, address _deployer, address _admin) Ownable(_deployer) {
+        token = Ploutos(_token);
         admin = _admin;
-        feeReceiver = _feeReceiver;
-        _mint(_feeReceiver, 11000046153 * 10 ** 7); // Mint 110000461.53 tokens to admin
     }
 
-    function airdrop() external payable nonReentrant {
-        require(msg.value == FEE, "Incorrect fee");
-        require(allocations[msg.sender].length == 0, "NOT ALLOWED");
-        payable(feeReceiver).transfer(msg.value);
-
-        Allocation memory newAllocation = Allocation({
-            totalAmount: AIRDROP_AMOUNT,
-            claimedAmount: IMMEDIATE_AIRDROP,
-            nextClaimTime: block.timestamp + DAY30
-        });
-
-        allocations[msg.sender].push(newAllocation);
-        _mint(msg.sender, IMMEDIATE_AIRDROP);
-
-        emit AirdropClaimed(msg.sender, AIRDROP_AMOUNT);
-        emit AllocationClaimed(msg.sender, IMMEDIATE_AIRDROP);
-    }
-
-    function buyPresale() external payable nonReentrant {
-        require(presaleActive, "Presale is not active");
-        require(presaleRate > 0, "Presale is not set");
+    function buyPrivateSale() external payable nonReentrant {
+        require(presaleActive, "Private sale is not active");
+        require(presaleRate > 0, "Private sale is not set");
         uint256 amount = (msg.value * presaleRate) / (1 ether);
         uint256 immediateAmount = amount / 100;
+
+        require(
+            token.balanceOf(address(this)) >=
+                unclaimedAllocation + amount,
+            "NOT ENOUGH TOKEN IN DISTRIBUTOR"
+        );
+
         payable(admin).transfer(msg.value);
 
         allocations[msg.sender].push(
@@ -76,7 +82,9 @@ contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
             })
         );
 
-        _mint(msg.sender, immediateAmount);
+        unclaimedAllocation += (amount - immediateAmount);
+
+        token.transfer(msg.sender, immediateAmount);
         emit PresalePurchased(msg.sender, amount);
     }
 
@@ -105,27 +113,29 @@ contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
             // Update the next claim time by adding the elapsed time (periods * DAY30)
             allocation.nextClaimTime += periodsElapsed * DAY30;
 
-            _mint(msg.sender, claimable);
+            token.transfer(msg.sender, claimable);
+            unclaimedAllocation -= claimable;
             emit AllocationClaimed(msg.sender, claimable);
         } else {
             revert("No elapsed periods");
         }
     }
 
-    function setPresaleRate(uint256 _rate) external {
-        require(msg.sender == admin || msg.sender == owner(), "ACCESS DENIED");
+    function setPresaleRate(uint256 _rate) isAdministrator external {
         presaleRate = _rate;
         emit PresaleRateChanged(_rate);
     }
 
-    function startStopPresale(bool _status) external {
-        require(msg.sender == admin || msg.sender == owner(), "ACCESS DENIED");
+    function startStopPrivateSale(bool _status) isAdministrator external {
         presaleActive = _status;
         emit PresaleStatusChanged(_status);
     }
 
-    function giveAllocation(address user, uint256 amount) external {
-        require(msg.sender == admin || msg.sender == owner(), "ACCESS DENIED");
+    function giveAllocation(address user, uint256 amount) isAdministrator external {
+        require(
+            token.balanceOf(address(this)) >= unclaimedAllocation + amount,
+            "NOT ENOUGH TOKEN IN DISTRIBUTOR"
+        );
 
         Allocation memory newAllocation = Allocation({
             totalAmount: amount,
@@ -133,6 +143,7 @@ contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
             nextClaimTime: block.timestamp
         });
 
+        unclaimedAllocation += amount;
         allocations[user].push(newAllocation);
 
         emit AllocationIncreased(user, amount);
@@ -157,17 +168,5 @@ contract Ploutos is ERC20Capped, ReentrancyGuard, Ownable {
         totalAmount = allocations[user][index].totalAmount;
         claimedAmount = allocations[user][index].claimedAmount;
         nextClaimTime = allocations[user][index].nextClaimTime;
-    }
-
-    function decimals() public pure override returns (uint8) {
-        return 9;
-    }
-
-    function totalSupply() public pure override returns (uint256) {
-        return maxSupply;
-    }
-
-    function circlatingSupply() public view returns (uint256) {
-        return super.totalSupply();
     }
 }
